@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
-from llm_utils import classify_reference_row, llm_classify_change
+from llm_utils import NO_MATCH_MESSAGE, classify_reference_row, llm_classify_change
 from main import get_required_documents, suggest_process
 from regulation_tools import (
     action_plan_tool,
@@ -210,11 +210,11 @@ def orchestrate_change_analysis(
 
     if not state.classification or "error" in state.classification:
         return {
-            "error": "No close match found. Manual review needed.",
+            "error": NO_MATCH_MESSAGE,
             "workflow_steps": state.workflow_steps or [
                 "Planner attempted workbook retrieval.",
                 "No sufficiently reliable match was identified.",
-                "Escalate for manual review.",
+                "Check with your health authority.",
             ],
             "tool_trace": state.tool_trace,
         }

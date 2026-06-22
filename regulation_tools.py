@@ -8,7 +8,6 @@ from functools import lru_cache
 from typing import Any, Dict, List, Sequence, Tuple
 
 import pandas as pd
-from PyPDF2 import PdfReader
 
 from llm_utils import rank_reference_rows
 from main import get_required_documents, suggest_process
@@ -90,7 +89,12 @@ def risk_assessor_tool(classification: Dict[str, Any]) -> Dict[str, str]:
     procedure_type = str(classification.get("procedure_type", "")).upper()
     category = str(classification.get("category", "")).lower()
 
-    if "TYPE II" in procedure_type or "extension" in procedure_type.lower():
+    if (
+        "TYPE II" in procedure_type
+        or "extension" in procedure_type.lower()
+        or "CATEGORY 3" in procedure_type
+        or "SUPPLEMENT" in procedure_type
+    ):
         risk_level = "high"
         rationale = "This pathway usually requires a fuller regulatory assessment before implementation."
     elif "TYPE IB" in procedure_type:
@@ -122,6 +126,8 @@ def action_plan_tool(classification: Dict[str, Any]) -> List[str]:
 
 @lru_cache(maxsize=1)
 def _load_pdf_pages(pdf_path: str) -> List[str]:
+    from PyPDF2 import PdfReader
+
     reader = PdfReader(pdf_path)
     pages: List[str] = []
     for page in reader.pages:

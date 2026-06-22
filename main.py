@@ -1,11 +1,11 @@
-"""
-main.py - Core backend agent logic for EU Post-Approval Change Management
-"""
+"""Core backend logic for country-specific post-approval change management."""
+import argparse
 import re
+from pathlib import Path
 from typing import Any, Dict, List
 
 import pandas as pd
-from llm_utils import build_vectorstore_from_excel, llm_classify_change
+from llm_utils import NO_MATCH_MESSAGE, build_vectorstore_from_excel, llm_classify_change
 
 
 def classify_change(description: str, reference_df: pd.DataFrame) -> Dict[str, Any]:
@@ -30,7 +30,7 @@ def classify_change(description: str, reference_df: pd.DataFrame) -> Dict[str, A
             "filing_required": row.get("filing_required", ""),
             "filing_description": row.get("filing_description", ""),
         }
-    return {"error": "No close match found. Manual review needed."}
+    return {"error": NO_MATCH_MESSAGE}
 
 
 def get_required_documents(classification: Dict[str, Any]) -> List[str]:
@@ -49,6 +49,24 @@ def get_required_documents(classification: Dict[str, Any]) -> List[str]:
 
 def suggest_process(classification: Dict[str, Any]) -> str:
     proc = str(classification.get("procedure_type", "")).upper()
+    market = str(classification.get("market", "")).upper()
+
+    if market == "AUSTRALIA":
+        if "DO NOT REQUIRE REPORTING" in proc:
+            return "Implement the change after confirming all stated conditions; no TGA variation filing is indicated for this workbook scenario."
+        if "NOTIFICATION" in proc:
+            return "Submit the applicable TGA notification and follow the timing stated in the matched filing guidance."
+        if "CATEGORY 3" in proc:
+            return "Prepare a Category 3 TGA variation package and obtain the required regulatory clearance before implementation."
+
+    if market == "CANADA":
+        if "ANNUAL NOTIFICATION" in proc:
+            return "Document the change and include it in the applicable Health Canada annual notification cycle."
+        if "NOTIFIABLE CHANGE" in proc:
+            return "Submit the notifiable change package to Health Canada and follow the applicable review requirements before implementation."
+        if "SUPPLEMENT" in proc:
+            return "Prepare the applicable Health Canada supplement and wait for the required authorization before implementation."
+
     if "TYPE IA" in proc:
         return "Implement the change first, then notify the authority within the applicable Type IA reporting window."
     if "TYPE IB" in proc:
@@ -61,8 +79,18 @@ def suggest_process(classification: Dict[str, Any]) -> str:
 
 
 if __name__ == "__main__":
-    excel_path = "EU_Post_Approval_Changes_Copy.xlsx"
-    vectorstore, reference_df = build_vectorstore_from_excel(excel_path)
+    workbooks = {
+        "australia": "Australia.xlsx",
+        "canada": "Canada.xlsx",
+        "eu": "EU_TypeIB_Created.xlsx",
+        "switzerland": "Switzerland_TypeIB_Created.xlsx",
+    }
+    parser = argparse.ArgumentParser(description="Analyze a post-approval change.")
+    parser.add_argument("country", choices=workbooks)
+    args = parser.parse_args()
+
+    excel_path = Path(__file__).resolve().parent / workbooks[args.country]
+    vectorstore, reference_df = build_vectorstore_from_excel(str(excel_path))
 
     change_desc = input("Describe your post-approval change: ")
     classification = llm_classify_change(change_desc, vectorstore, reference_df)

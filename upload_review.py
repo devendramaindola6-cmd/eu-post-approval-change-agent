@@ -7,7 +7,6 @@ from io import BytesIO
 from typing import Any, Dict, List
 
 import pandas as pd
-from PyPDF2 import PdfReader
 
 
 SUPPORTED_UPLOAD_TYPES = (".txt", ".pdf", ".csv", ".xlsx")
@@ -20,6 +19,8 @@ def extract_uploaded_text(file_name: str, file_bytes: bytes) -> str:
         return file_bytes.decode("utf-8", errors="ignore")
 
     if lower_name.endswith(".pdf"):
+        from PyPDF2 import PdfReader
+
         reader = PdfReader(BytesIO(file_bytes))
         return "\n".join(page.extract_text() or "" for page in reader.pages)
 

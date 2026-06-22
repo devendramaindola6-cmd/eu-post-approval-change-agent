@@ -1,90 +1,96 @@
-"""
-Streamlit UI for EU Post-Approval Change Management Agentic AI
-"""
-import os
+"""Streamlit UI for country-specific post-approval change assessment."""
+from __future__ import annotations
 
+import os
+from pathlib import Path
+
+import pandas as pd
 import streamlit as st
 from streamlit.errors import StreamlitSecretNotFoundError
 
 from agent_workflow import orchestrate_change_analysis
 from guided_decision import filter_rows_by_condition_answers, parse_conditions, unique_conditions_for_rows
-from llm_utils import build_vectorstore_from_excel, rank_reference_rows
-from upload_review import SUPPORTED_UPLOAD_TYPES, extract_uploaded_text
+from llm_utils import NO_MATCH_MESSAGE, build_vectorstore_from_excel, load_reference_table
 
-AMBIGUOUS_CHANGE_EXAMPLES = [
-    "Change the invented name of the finished product.",
-    "We are updating manufacturing details for the product.",
-    "A packaging-related change is planned, but the component impact is still unclear.",
-    "There is a site-related update for the finished product and batch release activities.",
-    "Administrative information in the dossier needs to be updated.",
-]
+PROJECT_ROOT = Path(__file__).resolve().parent
 
-st.title("EU Post-Approval Change Management AI")
+COUNTRY_CONFIG = {
+    "Australia": {
+        "workbook": "Australia.xlsx",
+        "market": "Australia",
+    },
+    "Canada": {
+        "workbook": "Canada.xlsx",
+        "market": "Canada",
+    },
+    "European Union": {
+        "workbook": "EU_TypeIB_Created.xlsx",
+        "market": "EU",
+    },
+    "Switzerland": {
+        "workbook": "Switzerland_TypeIB_Created.xlsx",
+        "market": "Switzerland",
+    },
+}
 
-st.markdown("""
-Enter a description of your post-approval change. The agent will classify the change, list required documents, and recommend the regulatory process.
-""")
+st.set_page_config(page_title="Post-Approval Change Management AI", layout="wide")
+st.title("Post-Approval Change Management AI")
+st.caption("Choose a country, follow the suggested change path, then generate only the relevant regulatory output.")
 
 
 def configure_openai_api_key() -> None:
     if os.environ.get("OPENAI_API_KEY"):
         return
-
     try:
         secret_key = st.secrets.get("OPENAI_API_KEY")
     except StreamlitSecretNotFoundError:
         secret_key = None
-
     if secret_key:
         os.environ["OPENAI_API_KEY"] = secret_key
 
 
-def ensure_openai_api_key() -> None:
-    return
-
-
-configure_openai_api_key()
-ensure_openai_api_key()
-
-# Load reference data and build vectorstore (cache for performance)
-@st.cache_resource
-def load_resources():
-    excel_path = "EU_Post_Approval_Changes_Copy.xlsx"
-    pdf_path = "EU Post approval Guidelines.pdf"
-    try:
-        vectorstore, reference_df = build_vectorstore_from_excel(excel_path)
-        return vectorstore, reference_df, retrieval_mode_from_vectorstore(vectorstore), None, pdf_path
-    except Exception as exc:
-        from llm_utils import load_reference_table
-
-        reference_df = load_reference_table(excel_path)
-        return None, reference_df, "keyword", str(exc), pdf_path
-
-
-def retrieval_mode_from_vectorstore(vectorstore) -> str:
-    return "hybrid" if vectorstore is not None else "keyword"
+def _pill_selector(label, options, key, help_text=None, format_func=None):
+    options = list(options)
+    format_func = format_func or str
+    if hasattr(st, "pills"):
+        return st.pills(
+            label,
+            options,
+            key=key,
+            help=help_text,
+            format_func=format_func,
+        )
+    return st.radio(
+        label,
+        options,
+        index=None,
+        horizontal=True,
+        key=key,
+        help=help_text,
+        format_func=format_func,
+    )
 
 
 def _clean_options(values):
-    return sorted({str(value).strip() for value in values if str(value).strip() and str(value) != "nan"})
+    return sorted(
+        {
+            str(value).strip()
+            for value in values
+            if str(value).strip() and str(value).strip().lower() != "nan"
+        },
+        key=str.casefold,
+    )
 
 
 def _filter_by_selection(df, column, selected_value):
-    if not selected_value or selected_value == "All":
+    if not selected_value:
         return df
-    return df[df[column].fillna("").astype(str) == selected_value]
+    return df[df[column].fillna("").astype(str).str.strip() == selected_value]
 
 
-def _ranked_options(description, df, column):
-    if not description.strip():
-        return _clean_options(df[column].dropna().unique())
-
-    scored = {}
-    for row, score in rank_reference_rows(description, df, limit=len(df)):
-        value = str(row.get(column, "")).strip()
-        if value and value != "nan":
-            scored[value] = max(scored.get(value, 0.0), float(score))
-    return [value for value, _ in sorted(scored.items(), key=lambda item: (-item[1], item[0]))]
+def _compact_suggestion(value):
+    compact = " ".join(str(value).split())
+    return compact if len(compact) <= 150 else f"{compact[:147].rstrip()}..."
 
 
 def _format_reference_option(row):
@@ -92,20 +98,46 @@ def _format_reference_option(row):
         f"Ref {row.get('reference_id', 'N/A')}",
         str(row.get("procedure_type", "N/A")),
         str(row.get("change_category", "N/A")),
-        str(row.get("change_item", "N/A")),
+        str(row.get("change_scenario", "")).strip(),
     ]
-    return " | ".join(part for part in parts if part and part != "nan")
+    return " | ".join(part for part in parts if part and part.lower() != "nan")
 
 
-def _extract_uploaded_document(uploaded_file):
-    if uploaded_file is None:
-        return None
+def _format_output_value(value, empty_message="Not specified"):
+    if value is None:
+        return empty_message
+    if isinstance(value, (list, tuple, set)):
+        cleaned = [str(item).strip() for item in value if str(item).strip()]
+        return "\n".join(f"{index}. {item}" for index, item in enumerate(cleaned, start=1)) or empty_message
+    text = str(value).strip()
+    return text if text and text.lower() != "nan" else empty_message
 
-    uploaded_text = extract_uploaded_text(uploaded_file.name, uploaded_file.getvalue())
-    return {
-        "name": uploaded_file.name,
-        "text": uploaded_text,
-    }
+
+def _build_output_table(analysis):
+    conditions = parse_conditions(analysis.get("conditions", ""))
+    guided_decisions = analysis.get("guided_decisions", {})
+    rows = [
+        ("Country / Region", analysis.get("selected_country") or analysis.get("market")),
+        ("Material Type", guided_decisions.get("material_type")),
+        ("Change Type", analysis.get("change_type")),
+        ("User Change Description", analysis.get("user_change_description")),
+        ("Matched Regulatory Change", analysis.get("description")),
+        ("Applicable Conditions", conditions or "No conditions listed"),
+        ("Filing Required", analysis.get("filing_required")),
+        ("Submission Type", analysis.get("procedure_type")),
+        ("Impact Classification", analysis.get("category")),
+        ("Filing Guidance", analysis.get("filing_description")),
+        ("Required Documents", analysis.get("required_documents_list") or "No documents listed"),
+        ("Recommended Process", analysis.get("recommended_process")),
+        ("Next Actions", analysis.get("action_plan")),
+    ]
+
+    return pd.DataFrame(
+        [
+            {"Information": label, "Result": _format_output_value(value)}
+            for label, value in rows
+        ]
+    )
 
 
 def _render_analysis(analysis):
@@ -113,198 +145,221 @@ def _render_analysis(analysis):
         st.error(analysis["error"])
         return
 
-    st.subheader("Agent Decision")
+    st.divider()
+    st.subheader("Regulatory assessment")
+    output_df = _build_output_table(analysis)
+    st.dataframe(
+        output_df,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Information": st.column_config.TextColumn("Information", width="medium"),
+            "Result": st.column_config.TextColumn("Result", width="large"),
+        },
+    )
 
-    st.write(f"**Reference ID:** {analysis.get('reference_id', 'N/A')}")
-    st.write(f"**Change Type:** {analysis.get('change_type', 'N/A')}")
-    st.write(f"**Change Item:** {analysis.get('description', 'N/A')}")
-    st.write(f"**Classification:** {analysis.get('category', 'N/A')}")
-    st.write(f"**Procedure Type:** {analysis.get('procedure_type', 'N/A')}")
-    st.write(f"**Filing Required:** {analysis.get('filing_required', 'N/A')}")
-    st.write(f"**Market:** {analysis.get('market', 'N/A')}")
-    st.write(f"**Match Method:** {analysis.get('match_method', retrieval_mode)}")
-    st.write(f"**Confidence:** {analysis.get('confidence', 'N/A').title()}")
-    st.write(f"**Risk Level:** {analysis.get('risk_level', 'N/A').title()}")
-
-    if analysis.get("guided_decisions"):
-        st.subheader("Selected Path")
-        st.write(analysis["guided_decisions"])
-
-    st.subheader("Workflow")
-    st.write(analysis.get("workflow_steps", []))
-
-    st.subheader("Agent Summary")
-    st.write(analysis.get("agent_summary", "N/A"))
-
-    st.subheader("Evidence Summary")
-    st.write(analysis.get("evidence_summary", "N/A"))
-
-    if analysis.get("needs_clarification"):
-        st.warning("This request looks ambiguous. Review the clarification questions before treating the recommendation as final.")
-        st.write(analysis.get("clarification_questions", []))
-
-    if analysis.get("conditions"):
-        st.subheader("Conditions")
-        st.write(analysis["conditions"])
-
-    if analysis.get("filing_description"):
-        st.subheader("Filing Guidance")
-        st.write(analysis["filing_description"])
-
-    st.subheader("Required Documents")
-    docs = analysis.get("required_documents_list", [])
-    if docs:
-        st.write(docs)
-    else:
-        st.write("No documents listed in the workbook for this entry.")
-
-    st.subheader("Recommended Process")
-    st.write(analysis.get("recommended_process", "N/A"))
-
-    st.subheader("Next Actions")
-    st.write(analysis.get("action_plan", []))
-
-    st.subheader("Top Candidate Matches")
-    st.write(analysis.get("top_matches", []))
-
-    if analysis.get("pdf_evidence"):
-        st.subheader("PDF Evidence")
-        st.write(analysis.get("pdf_evidence", []))
-
-    if analysis.get("uploaded_document_review"):
-        st.subheader("Uploaded Document Review")
-        st.write(analysis.get("uploaded_document_review", {}))
-
-    st.subheader("Tool Trace")
-    st.write(analysis.get("tool_trace", []))
+    country_slug = str(
+        analysis.get("selected_country") or analysis.get("market") or "regulatory"
+    ).lower().replace(" ", "_")
+    st.download_button(
+        "Download assessment as CSV",
+        data=output_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"{country_slug}_post_approval_assessment.csv",
+        mime="text/csv",
+        width="stretch",
+    )
 
 
-vectorstore, reference_df, retrieval_mode, load_warning, pdf_path = load_resources()
+configure_openai_api_key()
 
-with st.sidebar:
-    st.subheader("Agent Status")
-    st.write(f"**Workbook rows:** {len(reference_df)}")
-    st.write(f"**Retrieval mode:** {retrieval_mode}")
-    st.write(f"**PDF guidance:** {'available' if os.path.exists(pdf_path) else 'missing'}")
-    st.write(f"**OpenAI key configured:** {'yes' if bool(os.environ.get('OPENAI_API_KEY')) else 'no'}")
-    if load_warning:
-        st.caption(f"Fallback reason: {load_warning}")
 
-if retrieval_mode == "hybrid":
-    st.caption("Retrieval mode: hybrid semantic + keyword matching")
-else:
-    st.warning("Running in keyword-only fallback mode because OpenAI embeddings are unavailable.")
-    if load_warning:
-        st.caption(f"Fallback reason: {load_warning}")
+@st.cache_resource(show_spinner=False)
+def load_country_resources(country_name):
+    config = COUNTRY_CONFIG[country_name]
+    workbook_path = PROJECT_ROOT / config["workbook"]
 
-with st.expander("Ambiguous change examples"):
-    st.write("Use these to test clarification behavior:")
-    st.code("\n\n".join(AMBIGUOUS_CHANGE_EXAMPLES))
+    reference_df = load_reference_table(str(workbook_path))
+    market_rows = reference_df[
+        reference_df["market"].fillna("").astype(str).str.strip().str.casefold()
+        == config["market"].casefold()
+    ]
+    if not market_rows.empty:
+        reference_df = market_rows.reset_index(drop=True).copy()
+        reference_df["reference_id"] = reference_df.index.astype(str)
 
-change_desc = st.text_area("Describe your post-approval change:")
-uploaded_file = st.file_uploader(
-    "Optional supporting document upload",
-    type=[suffix.lstrip(".") for suffix in SUPPORTED_UPLOAD_TYPES],
-    help="Upload a TXT, PDF, CSV, or XLSX file for document review against the matched filing scenario.",
+    if not os.environ.get("OPENAI_API_KEY"):
+        return None, reference_df
+
+    try:
+        vectorstore, semantic_df = build_vectorstore_from_excel(str(workbook_path))
+        return vectorstore, semantic_df
+    except Exception:
+        return None, reference_df
+
+
+selected_country = _pill_selector(
+    "Select a country or region",
+    COUNTRY_CONFIG.keys(),
+    key="selected_country",
 )
 
-if change_desc.strip():
-    st.subheader("Guided Decision Tree")
+if not selected_country:
+    st.info("Select a country to begin.")
+    st.stop()
 
-    filtered_df = reference_df.copy()
-    user_decisions = {}
+with st.spinner(f"Loading {selected_country} guidance..."):
+    vectorstore, reference_df = load_country_resources(selected_country)
 
-    material_options = ["All"] + _ranked_options(change_desc, filtered_df, "material_type")
-    selected_material = st.selectbox("Material type", material_options)
-    filtered_df = _filter_by_selection(filtered_df, "material_type", selected_material)
-    user_decisions["material_type"] = selected_material
+st.subheader("1. Choose the proposed change")
 
-    change_type_options = _ranked_options(change_desc, filtered_df, "change_type")
-    selected_change_type = st.selectbox("Change type", change_type_options)
-    filtered_df = _filter_by_selection(filtered_df, "change_type", selected_change_type)
-    user_decisions["change_type"] = selected_change_type
+material_options = _clean_options(reference_df["material_type"].dropna().unique())
+selected_material = _pill_selector(
+    "Material type",
+    material_options,
+    key=f"material_{selected_country}",
+)
+if not selected_material:
+    st.info("Select a material type to see relevant change suggestions.")
+    st.stop()
 
-    change_item_options = _ranked_options(change_desc, filtered_df, "change_item")
-    selected_change_item = st.selectbox("Specific change item", change_item_options)
-    filtered_df = _filter_by_selection(filtered_df, "change_item", selected_change_item)
-    user_decisions["change_item"] = selected_change_item
+filtered_df = _filter_by_selection(reference_df, "material_type", selected_material)
+change_type_options = _clean_options(filtered_df["change_type"].dropna().unique())
+selected_change_type = _pill_selector(
+    "Change type",
+    change_type_options,
+    key=f"change_type_{selected_country}_{selected_material}",
+)
+if not selected_change_type:
+    st.info("Select a change type to see specific suggested changes.")
+    st.stop()
 
-    condition_questions = unique_conditions_for_rows(filtered_df)
-    if condition_questions:
-        st.subheader("Condition Check")
-        condition_answers = {}
-        for index, condition in enumerate(condition_questions, start=1):
-            answer = st.radio(
-                condition,
-                ["Yes", "No", "Not sure"],
-                horizontal=True,
-                key=f"condition_{index}_{abs(hash(condition))}",
-            )
-            condition_answers[condition] = answer
-        user_decisions["condition_answers"] = condition_answers
+filtered_df = _filter_by_selection(filtered_df, "change_type", selected_change_type)
+change_item_options = _clean_options(filtered_df["change_item"].dropna().unique())
+selected_change_item = _pill_selector(
+    "Suggested change",
+    change_item_options,
+    key=f"change_item_{selected_country}_{selected_material}_{selected_change_type}",
+    help_text="Choose the closest suggestion. You can edit its wording in the next field.",
+    format_func=_compact_suggestion,
+)
+if not selected_change_item:
+    st.info("Select the closest suggested change.")
+    st.stop()
 
-        if "Not sure" in condition_answers.values():
-            st.warning("Some conditions are marked as not sure. The matching entries remain available for manual selection.")
-        else:
-            filtered_df = filter_rows_by_condition_answers(filtered_df, condition_answers)
+draft_key = f"change_description_{selected_country}"
+source_key = f"change_description_source_{selected_country}"
+if st.session_state.get(source_key) != selected_change_item:
+    st.session_state[draft_key] = selected_change_item
+    st.session_state[source_key] = selected_change_item
 
-    if len(filtered_df) > 1:
-        scenario_options = _clean_options(filtered_df["change_scenario"].dropna().unique())
-        if len(scenario_options) > 1:
-            selected_scenario = st.selectbox("Change scenario", scenario_options)
-            filtered_df = _filter_by_selection(filtered_df, "change_scenario", selected_scenario)
-            user_decisions["change_scenario"] = selected_scenario
+change_desc = st.text_area(
+    "Edit or add details",
+    key=draft_key,
+    help="Keep the suggested wording or add product-specific context before analysis.",
+)
 
-    if len(filtered_df) > 1:
-        procedure_options = _clean_options(filtered_df["procedure_type"].dropna().unique())
-        if len(procedure_options) > 1:
-            selected_procedure = st.selectbox("Filing pathway", procedure_options)
-            filtered_df = _filter_by_selection(filtered_df, "procedure_type", selected_procedure)
-            user_decisions["procedure_type"] = selected_procedure
+filtered_df = _filter_by_selection(filtered_df, "change_item", selected_change_item)
+user_decisions = {
+    "country": selected_country,
+    "material_type": selected_material,
+    "change_type": selected_change_type,
+    "change_item": selected_change_item,
+}
 
-    if len(filtered_df) > 1:
-        category_options = _clean_options(filtered_df["change_category"].dropna().unique())
-        if len(category_options) > 1:
-            selected_category = st.selectbox("Impact classification", category_options)
-            filtered_df = _filter_by_selection(filtered_df, "change_category", selected_category)
-            user_decisions["change_category"] = selected_category
+st.subheader("2. Confirm the applicable scenario")
 
+condition_questions = unique_conditions_for_rows(filtered_df)
+if condition_questions:
+    condition_answers = {}
+    for index, condition in enumerate(condition_questions, start=1):
+        answer = _pill_selector(
+            condition,
+            ["Yes", "No", "Not sure"],
+            key=f"condition_{selected_country}_{index}_{abs(hash(condition))}",
+        )
+        if answer is None:
+            st.info("Answer each condition to continue.")
+            st.stop()
+        condition_answers[condition] = answer
+    user_decisions["condition_answers"] = condition_answers
+
+    if "Not sure" in condition_answers.values():
+        st.warning("One or more conditions are uncertain. Review the final workbook scenario carefully.")
+    else:
+        filtered_df = filter_rows_by_condition_answers(filtered_df, condition_answers)
+
+for column, label in (
+    ("change_scenario", "Change scenario"),
+    ("procedure_type", "Filing pathway"),
+    ("change_category", "Impact classification"),
+):
+    if len(filtered_df) <= 1:
+        break
+    if column not in filtered_df.columns:
+        continue
+    options = _clean_options(filtered_df[column].dropna().unique())
+    if len(options) > 1:
+        selection = _pill_selector(
+            label,
+            options,
+            key=f"{column}_{selected_country}_{selected_material}_{selected_change_type}_{selected_change_item}",
+        )
+        if not selection:
+            st.info(f"Select the {label.lower()} to continue.")
+            st.stop()
+        filtered_df = _filter_by_selection(filtered_df, column, selection)
+        user_decisions[column] = selection
+
+if filtered_df.empty:
+    st.error(NO_MATCH_MESSAGE)
+    st.stop()
+
+if len(filtered_df) == 1:
+    selected_row = filtered_df.iloc[0]
+else:
     reference_options = {
         _format_reference_option(row): str(row.get("reference_id", ""))
         for _, row in filtered_df.iterrows()
     }
-    selected_reference_label = st.selectbox("Final matching workbook entry", list(reference_options.keys()))
+    selected_reference_label = st.selectbox(
+        "Final matching workbook entry",
+        list(reference_options.keys()),
+    )
     selected_reference_id = reference_options[selected_reference_label]
-    selected_row = filtered_df[filtered_df["reference_id"].astype(str) == selected_reference_id].iloc[0]
-    user_decisions["reference_id"] = selected_reference_id
+    selected_row = filtered_df[
+        filtered_df["reference_id"].astype(str) == selected_reference_id
+    ].iloc[0]
 
-    with st.expander("Selected entry details", expanded=True):
-        selected_conditions = parse_conditions(selected_row.get("conditions", ""))
-        if selected_conditions:
-            st.write("**Conditions:**")
-            st.write(selected_conditions)
-        else:
-            st.write("**Conditions:** No Conditions")
-        st.write(f"**Filing description:** {selected_row.get('filing_description', 'N/A')}")
-        st.write(f"**Documents:** {selected_row.get('documents', 'N/A')}")
+selected_reference_id = str(selected_row["reference_id"])
+user_decisions["reference_id"] = selected_reference_id
 
-    if st.button("Analyze Selected Path"):
-        with st.spinner("Analyzing selected path..."):
-            try:
-                uploaded_document = _extract_uploaded_document(uploaded_file)
-            except Exception as exc:
-                st.error(f"Unable to read uploaded file: {exc}")
-                st.stop()
+st.subheader("3. Generate the relevant output")
+analysis_signature = (
+    selected_country,
+    selected_reference_id,
+    change_desc.strip(),
+)
+if st.button("Analyze selected path", type="primary", width="stretch"):
+    if not change_desc.strip():
+        st.error("Add a change description before analysis.")
+        st.stop()
 
-            analysis = orchestrate_change_analysis(
-                change_desc.strip(),
-                reference_df,
-                vectorstore=vectorstore,
-                pdf_path=pdf_path,
-                uploaded_document=uploaded_document,
-                selected_reference_id=selected_reference_id,
-                user_decisions=user_decisions,
-            )
-            _render_analysis(analysis)
-else:
-    st.info("Enter a change description to start the guided decision tree.")
+    with st.spinner("Analyzing the selected regulatory path..."):
+        analysis = orchestrate_change_analysis(
+            change_desc.strip(),
+            reference_df,
+            vectorstore=vectorstore,
+            pdf_path=None,
+            selected_reference_id=selected_reference_id,
+            user_decisions=user_decisions,
+        )
+        analysis["selected_country"] = selected_country
+        analysis["user_change_description"] = change_desc.strip()
+        st.session_state["latest_analysis"] = analysis
+        st.session_state["latest_analysis_signature"] = analysis_signature
+
+if (
+    st.session_state.get("latest_analysis")
+    and st.session_state.get("latest_analysis_signature") == analysis_signature
+):
+    _render_analysis(st.session_state["latest_analysis"])

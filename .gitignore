@@ -1,5 +1,55 @@
+# Secrets and local configuration
 .env
+.env.*
+!.env.example
 .streamlit/secrets.toml
+
+# Virtual environments
 .venv/
+venv/
+env/
+ENV/
+
+# Python bytecode and caches
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+
+# Test and coverage output
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Python build and packaging output
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Streamlit runtime cache
+.streamlit/cache/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+~$*.xlsx
+~$*.xls
+
+# IDE and local agent metadata
+.vscode/
+.idea/
+.agents/
+.codex/
+*.code-workspace
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+Desktop.ini

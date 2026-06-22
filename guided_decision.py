@@ -45,6 +45,10 @@ def filter_rows_by_condition_answers(df: pd.DataFrame, answers: Dict[str, str]) 
 
     if any_not_met:
         not_met_mask = scenario_text.str.contains("not met", regex=False)
+        if len(not_met_mask) == 0:
+            not_met_mask = conditions_text.str.contains("not met", regex=False)
+        else:
+            not_met_mask = not_met_mask | conditions_text.str.contains("not met", regex=False)
         no_conditions_mask = conditions_text.str.contains("no conditions", regex=False)
         narrowed = df[not_met_mask | no_conditions_mask]
         return narrowed if not narrowed.empty else df

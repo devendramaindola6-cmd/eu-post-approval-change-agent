@@ -3,13 +3,19 @@ from pathlib import Path
 
 from agent_workflow import orchestrate_change_analysis
 from guided_decision import filter_rows_by_condition_answers, parse_conditions, unique_conditions_for_rows
-from llm_utils import keyword_classify_change, load_reference_table
+from llm_utils import NO_MATCH_MESSAGE, keyword_classify_change, load_reference_table
 from main import get_required_documents, suggest_process
 from upload_review import extract_uploaded_text, review_uploaded_document
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-WORKBOOK_PATH = PROJECT_ROOT / "EU_Post_Approval_Changes_Copy.xlsx"
+WORKBOOK_PATH = PROJECT_ROOT / "EU_TypeIB_Created.xlsx"
+COUNTRY_WORKBOOKS = {
+    "Australia": PROJECT_ROOT / "Australia.xlsx",
+    "Canada": PROJECT_ROOT / "Canada.xlsx",
+    "EU": PROJECT_ROOT / "EU_TypeIB_Created.xlsx",
+    "Switzerland": PROJECT_ROOT / "Switzerland_TypeIB_Created.xlsx",
+}
 
 
 class ClassificationTests(unittest.TestCase):
@@ -24,6 +30,66 @@ class ClassificationTests(unittest.TestCase):
         )
         self.assertEqual(result["procedure_type"], "Type IA - IN")
         self.assertIn("centrally authorised", result["description"].lower())
+
+    def test_all_country_workbooks_load_with_normalized_columns(self):
+        for expected_market, workbook_path in COUNTRY_WORKBOOKS.items():
+            with self.subTest(market=expected_market):
+                country_df = load_reference_table(str(workbook_path))
+                self.assertFalse(country_df.empty)
+                self.assertIn("change_item", country_df.columns)
+                self.assertIn("conditions", country_df.columns)
+                markets = {
+                    str(value).strip()
+                    for value in country_df["market"].dropna().unique()
+                }
+                self.assertIn(expected_market, markets)
+
+    def test_every_country_reference_produces_complete_end_user_output(self):
+        required_fields = {
+            "market",
+            "change_type",
+            "description",
+            "category",
+            "procedure_type",
+            "filing_required",
+            "filing_description",
+            "required_documents_list",
+            "recommended_process",
+            "action_plan",
+        }
+        for expected_market, workbook_path in COUNTRY_WORKBOOKS.items():
+            country_df = load_reference_table(str(workbook_path))
+            for _, row in country_df.iterrows():
+                with self.subTest(market=expected_market, reference_id=row["reference_id"]):
+                    result = orchestrate_change_analysis(
+                        str(row["change_item"]),
+                        country_df,
+                        vectorstore=None,
+                        selected_reference_id=str(row["reference_id"]),
+                        user_decisions={"reference_id": str(row["reference_id"])},
+                    )
+                    self.assertNotIn("error", result)
+                    self.assertTrue(required_fields.issubset(result))
+                    self.assertEqual(result["market"], expected_market)
+                    self.assertTrue(str(result["procedure_type"]).strip())
+                    self.assertTrue(str(result["filing_description"]).strip())
+                    self.assertTrue(result["action_plan"])
+
+    def test_unmatched_description_uses_health_authority_message(self):
+        result = keyword_classify_change(
+            "zzzxxyy unmatched regulatory scenario 987654321",
+            self.reference_df,
+        )
+        self.assertEqual(result, {"error": NO_MATCH_MESSAGE})
+
+    def test_invalid_guided_reference_uses_health_authority_message(self):
+        result = orchestrate_change_analysis(
+            "A proposed change",
+            self.reference_df,
+            vectorstore=None,
+            selected_reference_id="does-not-exist",
+        )
+        self.assertEqual(result["error"], NO_MATCH_MESSAGE)
 
     def test_atc_code_query_returns_expected_documents(self):
         result = keyword_classify_change(
@@ -104,8 +170,7 @@ class ClassificationTests(unittest.TestCase):
         narrowed = filter_rows_by_condition_answers(subset, {condition: "Yes" for condition in conditions[:2]})
         self.assertFalse(narrowed.empty)
         combined_conditions = " ".join(narrowed["conditions"].fillna("").astype(str)).lower()
-        combined_scenarios = " ".join(narrowed["change_scenario"].fillna("").astype(str)).lower()
-        self.assertTrue("all condition" in combined_conditions or "all conditions are met" in combined_scenarios)
+        self.assertIn("all condition", combined_conditions)
 
     def test_condition_answers_route_to_not_met_scenario(self):
         subset = self.reference_df[
@@ -115,7 +180,7 @@ class ClassificationTests(unittest.TestCase):
         conditions = unique_conditions_for_rows(subset)
         narrowed = filter_rows_by_condition_answers(subset, {conditions[0]: "No"})
         self.assertFalse(narrowed.empty)
-        combined = " ".join(narrowed["change_scenario"].fillna("").astype(str)).lower()
+        combined = " ".join(narrowed["conditions"].fillna("").astype(str)).lower()
         self.assertTrue("not met" in combined or "no conditions" in combined)
 
     def test_condition_answers_with_not_sure_do_not_force_filtering(self):

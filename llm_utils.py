@@ -7,8 +7,6 @@ import re
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
-from langchain_community.vectorstores import FAISS
-from langchain_openai import OpenAIEmbeddings
 
 EXCEL_HEADER_ROW = 1
 
@@ -17,18 +15,24 @@ SOURCE_TO_NORMALIZED_COLUMNS = {
     "Material Type": "material_type",
     "Change Type": "change_type",
     "Change Item": "change_item",
+    "Health Authority Change Item": "change_item",
     "Pharmaceutical Dosage Form (No Abbreviations, Full Form Only)": "dosage_form",
+    "Pharmaceutical Dosage Form": "dosage_form",
     "Drug Release Mechanism": "drug_release_mechanism",
     "Market": "market",
     "Change Scenario": "change_scenario",
     "Health Authority Change Conditions (Write conditions only. If there are more than one, create a List like this: 1. <condition text> 2. <condition text>": "conditions",
+    "Health Authority Change Conditions": "conditions",
     "Data Source - Filing Requirements": "filing_data_source",
     "Filing Required?": "filing_required",
     "Health Authority Submission Type (Filing Type)": "procedure_type",
     "Filing Description (Write the ppplicable section No. of respective guideline - e.g. Q.1.a.1 from EU Guideline, add other Info if required.) ": "filing_description",
+    "Filing Description": "filing_description",
     "Change Classification": "change_category",
     "Additional Details - Filing Requirements (Subjective/ Free Text Remark)": "filing_notes",
+    "Additional Details - Filing Requirements": "filing_notes",
     "Data Source - Documentation Requirements+O2:R2": "documentation_data_source",
+    "Data Source - Documentation Requirements": "documentation_data_source",
     "Are there any documents need to be submitted to Health Authority for filing this Post Approval Change?": "documents_required_flag",
     "List the documents that need to be submitted for filing this Post Approval Change": "documents",
     "Additional Details - Documentation Requirements": "documentation_notes",
@@ -81,11 +85,26 @@ STOPWORDS = {
     "with",
 }
 
+NO_MATCH_MESSAGE = "No matching case was found. Check with your health authority."
+MINIMUM_ACCEPTED_MATCH_SCORE = 1.0
+
 
 def load_reference_table(path: str) -> pd.DataFrame:
     df = pd.read_excel(path, header=EXCEL_HEADER_ROW)
     df = df.dropna(axis=1, how="all")
-    df = df.rename(columns=SOURCE_TO_NORMALIZED_COLUMNS)
+    normalized_source_columns = {
+        re.sub(r"\s+", " ", str(source_name)).strip(): normalized_name
+        for source_name, normalized_name in SOURCE_TO_NORMALIZED_COLUMNS.items()
+    }
+    df = df.rename(
+        columns={
+            column: normalized_source_columns.get(
+                re.sub(r"\s+", " ", str(column)).strip(),
+                column,
+            )
+            for column in df.columns
+        }
+    )
 
     missing = sorted(REQUIRED_NORMALIZED_COLUMNS.difference(df.columns))
     if missing:
@@ -127,7 +146,7 @@ def _build_classification_payload(row: pd.Series) -> Dict[str, str]:
 def classify_reference_row(reference_id: str, df: pd.DataFrame) -> Dict[str, str]:
     matches = df[df["reference_id"].astype(str) == str(reference_id)]
     if matches.empty:
-        return {"error": "Selected workbook reference was not found. Manual review needed."}
+        return {"error": NO_MATCH_MESSAGE}
 
     result = _build_classification_payload(matches.iloc[0])
     result["match_score"] = 100.0
@@ -136,6 +155,9 @@ def classify_reference_row(reference_id: str, df: pd.DataFrame) -> Dict[str, str
 
 
 def build_vectorstore_from_excel(path: str):
+    from langchain_community.vectorstores import FAISS
+    from langchain_openai import OpenAIEmbeddings
+
     df = load_reference_table(path)
     texts = df["search_text"].fillna("").tolist()
     metadatas = [{"reference_id": ref_id} for ref_id in df["reference_id"]]
@@ -255,8 +277,8 @@ def rank_reference_rows(
 
 def keyword_classify_change(description: str, df: pd.DataFrame) -> Dict[str, str]:
     ranked_rows = rank_reference_rows(description, df, semantic_candidates=None, limit=1)
-    if not ranked_rows or ranked_rows[0][1] <= 0:
-        return {"error": "No close match found. Manual review needed."}
+    if not ranked_rows or ranked_rows[0][1] < MINIMUM_ACCEPTED_MATCH_SCORE:
+        return {"error": NO_MATCH_MESSAGE}
 
     row, score = ranked_rows[0]
     result = _build_classification_payload(row)
@@ -287,8 +309,8 @@ def llm_classify_change(description: str, vectorstore, df: pd.DataFrame):
             semantic_candidates = None
 
     ranked_rows = rank_reference_rows(description, df, semantic_candidates=semantic_candidates, limit=1)
-    if not ranked_rows or ranked_rows[0][1] <= 0:
-        return {"error": "No close match found. Manual review needed."}
+    if not ranked_rows or ranked_rows[0][1] < MINIMUM_ACCEPTED_MATCH_SCORE:
+        return {"error": NO_MATCH_MESSAGE}
 
     row, score = ranked_rows[0]
     result = _build_classification_payload(row)

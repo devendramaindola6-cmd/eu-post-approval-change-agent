@@ -21,6 +21,10 @@ This project automates the classification and management of post-approval change
 - Streamlit (UI)
 
 ## Getting Started
+For a complete newcomer-friendly setup, local run, testing, and deployment walkthrough, see [`BUILD_GUIDE.md`](BUILD_GUIDE.md).
+
+For a folder-by-folder and code-by-code explanation, see [`CODE_EXPLANATION.md`](CODE_EXPLANATION.md).
+
 1. Activate the virtual environment:
    
    ```sh
