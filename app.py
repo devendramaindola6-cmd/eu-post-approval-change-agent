@@ -9,7 +9,7 @@ import streamlit as st
 from streamlit.errors import StreamlitSecretNotFoundError
 
 from agent_workflow import orchestrate_change_analysis
-from guided_decision import filter_rows_by_condition_answers, parse_conditions, unique_conditions_for_rows
+from guided_decision import parse_conditions
 from llm_utils import NO_MATCH_MESSAGE, build_vectorstore_from_excel, load_reference_table
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -86,6 +86,25 @@ def _filter_by_selection(df, column, selected_value):
     if not selected_value:
         return df
     return df[df[column].fillna("").astype(str).str.strip() == selected_value]
+
+
+def _filter_options_by_query(options, query):
+    query_terms = str(query or "").casefold().split()
+    if not query_terms:
+        return []
+    return [
+        option
+        for option in options
+        if all(term in option.casefold() for term in query_terms)
+    ]
+
+
+def _key_fragment(value):
+    fragment = "".join(
+        character if character.isalnum() else "_"
+        for character in str(value or "").casefold()
+    ).strip("_")
+    return fragment[:40] or "empty"
 
 
 def _compact_suggestion(value):
@@ -224,10 +243,23 @@ if not selected_material:
 
 filtered_df = _filter_by_selection(reference_df, "material_type", selected_material)
 change_type_options = _clean_options(filtered_df["change_type"].dropna().unique())
+change_type_query = st.text_input(
+    "Type change type",
+    key=f"change_type_query_{selected_country}_{selected_material}",
+    placeholder="Start typing to see matching change types",
+)
+matching_change_type_options = _filter_options_by_query(change_type_options, change_type_query)
+if not change_type_query.strip():
+    st.info("Type a change type to see matching suggestions.")
+    st.stop()
+if not matching_change_type_options:
+    st.error(NO_MATCH_MESSAGE)
+    st.stop()
+
 selected_change_type = _pill_selector(
-    "Change type",
-    change_type_options,
-    key=f"change_type_{selected_country}_{selected_material}",
+    "Change type suggestions",
+    matching_change_type_options,
+    key=f"change_type_{selected_country}_{selected_material}_{_key_fragment(change_type_query)}",
 )
 if not selected_change_type:
     st.info("Select a change type to see specific suggested changes.")
@@ -265,28 +297,6 @@ user_decisions = {
     "change_type": selected_change_type,
     "change_item": selected_change_item,
 }
-
-st.subheader("2. Confirm the applicable scenario")
-
-condition_questions = unique_conditions_for_rows(filtered_df)
-if condition_questions:
-    condition_answers = {}
-    for index, condition in enumerate(condition_questions, start=1):
-        answer = _pill_selector(
-            condition,
-            ["Yes", "No", "Not sure"],
-            key=f"condition_{selected_country}_{index}_{abs(hash(condition))}",
-        )
-        if answer is None:
-            st.info("Answer each condition to continue.")
-            st.stop()
-        condition_answers[condition] = answer
-    user_decisions["condition_answers"] = condition_answers
-
-    if "Not sure" in condition_answers.values():
-        st.warning("One or more conditions are uncertain. Review the final workbook scenario carefully.")
-    else:
-        filtered_df = filter_rows_by_condition_answers(filtered_df, condition_answers)
 
 for column, label in (
     ("change_scenario", "Change scenario"),
@@ -333,7 +343,7 @@ else:
 selected_reference_id = str(selected_row["reference_id"])
 user_decisions["reference_id"] = selected_reference_id
 
-st.subheader("3. Generate the relevant output")
+st.subheader("2. Generate the relevant output")
 analysis_signature = (
     selected_country,
     selected_reference_id,
