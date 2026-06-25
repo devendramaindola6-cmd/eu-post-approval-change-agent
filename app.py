@@ -9,7 +9,7 @@ import streamlit as st
 from streamlit.errors import StreamlitSecretNotFoundError
 
 from agent_workflow import orchestrate_change_analysis
-from guided_decision import parse_conditions
+from guided_decision import filter_rows_by_condition_answers, parse_conditions, unique_conditions_for_rows
 from llm_utils import NO_MATCH_MESSAGE, build_vectorstore_from_excel, load_reference_table
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -298,6 +298,28 @@ user_decisions = {
     "change_item": selected_change_item,
 }
 
+st.subheader("2. Confirm the applicable scenario")
+
+condition_questions = unique_conditions_for_rows(filtered_df)
+if condition_questions:
+    condition_answers = {}
+    for index, condition in enumerate(condition_questions, start=1):
+        answer = _pill_selector(
+            condition,
+            ["Yes", "No", "Not sure"],
+            key=f"condition_{selected_country}_{index}_{abs(hash(condition))}",
+        )
+        if answer is None:
+            st.info("Answer each condition to continue.")
+            st.stop()
+        condition_answers[condition] = answer
+    user_decisions["condition_answers"] = condition_answers
+
+    if "Not sure" in condition_answers.values():
+        st.warning("One or more conditions are uncertain. Review the final workbook scenario carefully.")
+    else:
+        filtered_df = filter_rows_by_condition_answers(filtered_df, condition_answers)
+
 for column, label in (
     ("change_scenario", "Change scenario"),
     ("procedure_type", "Filing pathway"),
@@ -343,7 +365,7 @@ else:
 selected_reference_id = str(selected_row["reference_id"])
 user_decisions["reference_id"] = selected_reference_id
 
-st.subheader("2. Generate the relevant output")
+st.subheader("3. Generate the relevant output")
 analysis_signature = (
     selected_country,
     selected_reference_id,
