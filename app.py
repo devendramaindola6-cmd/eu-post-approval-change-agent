@@ -11,6 +11,7 @@ from streamlit.errors import StreamlitSecretNotFoundError
 from agent_workflow import orchestrate_change_analysis
 from guided_decision import filter_rows_by_condition_answers, parse_conditions, unique_conditions_for_rows
 from llm_utils import NO_MATCH_MESSAGE, build_vectorstore_from_excel, load_reference_table
+from ui_matching import filter_options_by_query
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -86,17 +87,6 @@ def _filter_by_selection(df, column, selected_value):
     if not selected_value:
         return df
     return df[df[column].fillna("").astype(str).str.strip() == selected_value]
-
-
-def _filter_options_by_query(options, query):
-    query_terms = str(query or "").casefold().split()
-    if not query_terms:
-        return []
-    return [
-        option
-        for option in options
-        if all(term in option.casefold() for term in query_terms)
-    ]
 
 
 def _key_fragment(value):
@@ -248,7 +238,7 @@ change_type_query = st.text_input(
     key=f"change_type_query_{selected_country}_{selected_material}",
     placeholder="Start typing to see matching change types",
 )
-matching_change_type_options = _filter_options_by_query(change_type_options, change_type_query)
+matching_change_type_options = filter_options_by_query(change_type_options, change_type_query)
 if not change_type_query.strip():
     st.info("Type a change type to see matching suggestions.")
     st.stop()

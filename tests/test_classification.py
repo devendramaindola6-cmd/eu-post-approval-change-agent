@@ -5,6 +5,7 @@ from agent_workflow import orchestrate_change_analysis
 from guided_decision import filter_rows_by_condition_answers, parse_conditions, unique_conditions_for_rows
 from llm_utils import NO_MATCH_MESSAGE, keyword_classify_change, load_reference_table
 from main import get_required_documents, suggest_process
+from ui_matching import filter_options_by_query
 from upload_review import extract_uploaded_text, review_uploaded_document
 
 
@@ -43,6 +44,24 @@ class ClassificationTests(unittest.TestCase):
                     for value in country_df["market"].dropna().unique()
                 }
                 self.assertIn(expected_market, markets)
+
+    def test_change_type_hints_ignore_conversational_words(self):
+        options = [
+            "Change in test procedure",
+            "Change in testing site",
+            "Change in Re-test Period (for Active Pharmaceutical Ingredients or Intermediates)",
+        ]
+        matches = filter_options_by_query(options, "i wnat to change test procedure")
+        self.assertIn("Change in test procedure", matches)
+
+    def test_change_type_hints_understand_natural_language_synonyms(self):
+        options = [
+            "Change in test procedure",
+            "Change in testing site",
+            "Change in Re-test Period (for Active Pharmaceutical Ingredients or Intermediates)",
+        ]
+        matches = filter_options_by_query(options, "I want to update analytical method")
+        self.assertEqual(matches[0], "Change in test procedure")
 
     def test_every_country_reference_produces_complete_end_user_output(self):
         required_fields = {
