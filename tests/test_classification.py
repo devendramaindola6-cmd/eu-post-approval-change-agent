@@ -161,6 +161,15 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(parse_conditions("No Conditions"), [])
         self.assertEqual(parse_conditions(""), [])
 
+    def test_condition_parser_hides_not_met_heading(self):
+        conditions = parse_conditions(
+            "If any condition is not met:\n"
+            "1. The API must not be sterile.\n"
+            "2. The container must be more protective."
+        )
+        self.assertEqual(len(conditions), 2)
+        self.assertNotIn("If any condition is not met", conditions[0])
+
     def test_condition_answers_route_to_met_scenario(self):
         subset = self.reference_df[
             self.reference_df["change_type"].astype(str)
@@ -171,6 +180,7 @@ class ClassificationTests(unittest.TestCase):
         self.assertFalse(narrowed.empty)
         combined_conditions = " ".join(narrowed["conditions"].fillna("").astype(str)).lower()
         self.assertIn("all condition", combined_conditions)
+        self.assertNotIn("if any condition is not met", combined_conditions)
 
     def test_condition_answers_route_to_not_met_scenario(self):
         subset = self.reference_df[

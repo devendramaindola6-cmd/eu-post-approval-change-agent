@@ -14,7 +14,12 @@ def parse_conditions(conditions_text: str) -> List[str]:
     if not text or text.lower() == "nan" or "no conditions" in text.lower():
         return []
 
-    text = re.sub(r"^\s*all\s+conditions?\s+are\s+met\s*:?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"^\s*(?:all\s+conditions?\s+are\s+met|if\s+any\s+condition\s+is\s+not\s+met)\s*:?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
     parts = re.split(r"(?:^|\n)\s*\d+[\.\)]\s+", text)
     conditions = [part.strip(" \n\t.;") for part in parts if part.strip(" \n\t.;")]
     if conditions:
@@ -40,8 +45,10 @@ def filter_rows_by_condition_answers(df: pd.DataFrame, answers: Dict[str, str]) 
         return df
 
     any_not_met = any(value == "No" for value in answered.values())
-    scenario_text = df.get("change_scenario", pd.Series(dtype=str)).fillna("").astype(str).str.lower()
-    conditions_text = df.get("conditions", pd.Series(dtype=str)).fillna("").astype(str).str.lower()
+    scenario_source = df["change_scenario"] if "change_scenario" in df.columns else pd.Series("", index=df.index)
+    conditions_source = df["conditions"] if "conditions" in df.columns else pd.Series("", index=df.index)
+    scenario_text = scenario_source.fillna("").astype(str).str.lower()
+    conditions_text = conditions_source.fillna("").astype(str).str.lower()
 
     if any_not_met:
         not_met_mask = scenario_text.str.contains("not met", regex=False)
@@ -57,4 +64,9 @@ def filter_rows_by_condition_answers(df: pd.DataFrame, answers: Dict[str, str]) 
     possibility_met_mask = scenario_text.str.contains("possibility 1", regex=False)
     conditions_met_mask = conditions_text.str.contains("all condition", regex=False)
     narrowed = df[all_met_mask | possibility_met_mask | conditions_met_mask]
-    return narrowed if not narrowed.empty else df
+    if not narrowed.empty:
+        return narrowed
+
+    not_met_mask = scenario_text.str.contains("not met", regex=False) | conditions_text.str.contains("not met", regex=False)
+    met_rows = df[~not_met_mask]
+    return met_rows if not met_rows.empty else df

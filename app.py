@@ -300,6 +300,7 @@ user_decisions = {
 
 st.subheader("2. Confirm the applicable scenario")
 
+condition_route_resolved = False
 condition_questions = unique_conditions_for_rows(filtered_df)
 if condition_questions:
     condition_answers = {}
@@ -319,15 +320,20 @@ if condition_questions:
         st.warning("One or more conditions are uncertain. Review the final workbook scenario carefully.")
     else:
         filtered_df = filter_rows_by_condition_answers(filtered_df, condition_answers)
+        condition_route_resolved = True
+        if "change_scenario" in filtered_df.columns:
+            resolved_scenarios = _clean_options(filtered_df["change_scenario"].dropna().unique())
+            if len(resolved_scenarios) == 1:
+                user_decisions["change_scenario"] = resolved_scenarios[0]
 
 for column, label in (
     ("change_scenario", "Change scenario"),
-    ("procedure_type", "Filing pathway"),
-    ("change_category", "Impact classification"),
 ):
     if len(filtered_df) <= 1:
         break
     if column not in filtered_df.columns:
+        continue
+    if column == "change_scenario" and condition_route_resolved:
         continue
     options = _clean_options(filtered_df[column].dropna().unique())
     if len(options) > 1:
